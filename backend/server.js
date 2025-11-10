@@ -74,26 +74,24 @@ const fillTemplate = (template, variables) => {
 
 // Helper function to create HTML email from plain text
 const createHtmlEmail = (body) => {
-  // Convert line breaks to <br> tags - keep natural formatting
+  // Convert line breaks to <br> tags - preserve exact formatting, no indentation
   const htmlBody = body
     .split('\n')
-    .map(line => line)
-    .join('<br>\n');
+    .join('<br>');
 
-  return `
-<!DOCTYPE html>
+  // Match Gmail's exact styling from inspected element
+  return `<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
-<body style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; color: #000000; margin: 0; padding: 0;">
-  <div style="padding: 10px;">
-    ${htmlBody}
-  </div>
+<body style="font-family: Arial, Helvetica, sans-serif; font-size: 13px; line-height: 19.5px; color: rgb(34, 34, 34); direction: ltr; margin: 0; padding: 0;">
+<div>
+${htmlBody}
+</div>
 </body>
-</html>
-`.trim();
+</html>`;
 };
 
 // ==================== AUTH ROUTES ====================
