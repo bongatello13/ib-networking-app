@@ -1,14 +1,32 @@
 // server.js
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
+const { supabase } = require('./supabaseClient');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { google } = require('googleapis');
+const multer = require('multer');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Configure multer for memory storage
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept PDF, DOC, DOCX
+    const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF, DOC, and DOCX files are allowed'));
+    }
+  }
+});
 
 // Middleware
 app.use(cors({
@@ -16,12 +34,6 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
-
-// PostgreSQL connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
 
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
@@ -107,8 +119,13 @@ app.post('/api/auth/signup', async (req, res) => {
     }
 
     // Check if user exists
-    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (existingUser.rows.length > 0) {
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (existingUser) {
       return res.status(400).json({ error: 'User already exists' });
     }
 
@@ -116,12 +133,16 @@ app.post('/api/auth/signup', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Insert user
-    const result = await pool.query(
-      'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id, email, name',
-      [email, hashedPassword, name || null]
-    );
+    const { data: user, error: insertError } = await supabase
+      .from('users')
+      .insert([{ email, password: hashedPassword, name: name || null }])
+      .select('id, email, name')
+      .single();
 
-    const user = result.rows[0];
+    if (insertError) {
+      throw insertError;
+    }
+
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 
     res.json({ user, token });
@@ -142,12 +163,15 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Find user
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
+    const { data: user, error: queryError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (queryError || !user) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
-
-    const user = result.rows[0];
 
     // Verify password
     const validPassword = await bcrypt.compare(password, user.password);
@@ -170,16 +194,16 @@ app.post('/api/auth/login', async (req, res) => {
 // Get current user
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT id, email, name, gmail_refresh_token FROM users WHERE id = $1',
-      [req.user.id]
-    );
+    const { data: user, error: queryError } = await supabase
+      .from('users')
+      .select('id, email, name, gmail_refresh_token')
+      .eq('id', req.user.id)
+      .single();
 
-    if (result.rows.length === 0) {
+    if (queryError || !user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const user = result.rows[0];
     res.json({
       id: user.id,
       email: user.email,
@@ -200,6 +224,7 @@ app.get('/api/gmail/auth-url', authenticateToken, (req, res) => {
     access_type: 'offline',
     scope: [
       'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/gmail.settings.basic',
       'https://www.googleapis.com/auth/userinfo.email'
     ],
     state: req.user.id.toString(),
@@ -234,10 +259,14 @@ app.get('/api/gmail/callback', async (req, res) => {
     const gmailAddress = userInfo.data.email;
 
     // Save tokens to database
-    await pool.query(
-      'UPDATE users SET gmail_refresh_token = $1, gmail_access_token = $2, gmail_address = $3 WHERE id = $4',
-      [tokens.refresh_token || null, tokens.access_token, gmailAddress, userId]
-    );
+    await supabase
+      .from('users')
+      .update({
+        gmail_refresh_token: tokens.refresh_token || null,
+        gmail_access_token: tokens.access_token,
+        gmail_address: gmailAddress
+      })
+      .eq('id', userId);
 
     res.send(`
       <!DOCTYPE html>
@@ -280,11 +309,12 @@ app.get('/api/gmail/callback', async (req, res) => {
 // Check Gmail connection status
 app.get('/api/gmail/status', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT gmail_refresh_token, gmail_address FROM users WHERE id = $1',
-      [req.user.id]
-    );
-    const user = result.rows[0];
+    const { data: user } = await supabase
+      .from('users')
+      .select('gmail_refresh_token, gmail_address')
+      .eq('id', req.user.id)
+      .single();
+
     const connected = !!user?.gmail_refresh_token;
     res.json({
       connected,
@@ -299,14 +329,108 @@ app.get('/api/gmail/status', authenticateToken, async (req, res) => {
 // Disconnect Gmail
 app.post('/api/gmail/disconnect', authenticateToken, async (req, res) => {
   try {
-    await pool.query(
-      'UPDATE users SET gmail_refresh_token = NULL, gmail_access_token = NULL, gmail_address = NULL WHERE id = $1',
-      [req.user.id]
-    );
+    await supabase
+      .from('users')
+      .update({
+        gmail_refresh_token: null,
+        gmail_access_token: null,
+        gmail_address: null
+      })
+      .eq('id', req.user.id);
+
     res.json({ success: true });
   } catch (error) {
     console.error('Gmail disconnect error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get current signature
+app.get('/api/gmail/signature', authenticateToken, async (req, res) => {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('signature_text, signature_html, signature_updated_at')
+      .eq('id', req.user.id)
+      .single();
+
+    res.json({
+      text: user?.signature_text || '',
+      html: user?.signature_html || '',
+      updatedAt: user?.signature_updated_at || null
+    });
+  } catch (error) {
+    console.error('Get signature error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Save/update signature - saves to database and syncs to Gmail
+app.post('/api/gmail/signature', authenticateToken, async (req, res) => {
+  try {
+    const { signature } = req.body;
+
+    if (!signature || !signature.trim()) {
+      return res.status(400).json({ error: 'Signature text is required' });
+    }
+
+    // Get user's Gmail tokens
+    const { data: user } = await supabase
+      .from('users')
+      .select('gmail_refresh_token, gmail_access_token, gmail_address')
+      .eq('id', req.user.id)
+      .single();
+
+    if (!user?.gmail_refresh_token) {
+      return res.status(400).json({ error: 'Gmail not connected' });
+    }
+
+    // Convert plain text to HTML with proper line breaks
+    const htmlSignature = signature.split('\n').join('<br>');
+
+    // Set up OAuth2 client
+    const userAuth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+    userAuth.setCredentials({
+      refresh_token: user.gmail_refresh_token,
+      access_token: user.gmail_access_token
+    });
+
+    // Get Gmail API client
+    const gmail = google.gmail({ version: 'v1', auth: userAuth });
+
+    // Update signature in Gmail
+    await gmail.users.settings.sendAs.patch({
+      userId: 'me',
+      sendAsEmail: user.gmail_address,
+      requestBody: {
+        signature: htmlSignature
+      }
+    });
+
+    // Save to database
+    await supabase
+      .from('users')
+      .update({
+        signature_text: signature,
+        signature_html: htmlSignature,
+        signature_updated_at: new Date().toISOString()
+      })
+      .eq('id', req.user.id);
+
+    res.json({
+      success: true,
+      text: signature,
+      html: htmlSignature,
+      updatedAt: new Date().toISOString(),
+      message: 'Signature saved and synced to Gmail successfully'
+    });
+  } catch (error) {
+    console.error('Save signature error:', error);
+    res.status(500).json({ error: 'Failed to save signature: ' + error.message });
   }
 });
 
@@ -315,13 +439,16 @@ app.post('/api/gmail/disconnect', authenticateToken, async (req, res) => {
 // Get all templates
 app.get('/api/templates', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM templates WHERE user_id = $1 ORDER BY created_at DESC',
-      [req.user.id]
-    );
+    const { data: templates, error: queryError } = await supabase
+      .from('templates')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (queryError) throw queryError;
 
     // Add extracted variables to each template
-    const templatesWithVariables = result.rows.map(template => ({
+    const templatesWithVariables = templates.map(template => ({
       ...template,
       variables: extractVariables(template.subject + ' ' + template.body)
     }));
@@ -337,16 +464,17 @@ app.get('/api/templates', authenticateToken, async (req, res) => {
 app.get('/api/templates/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await pool.query(
-      'SELECT * FROM templates WHERE id = $1 AND user_id = $2',
-      [id, req.user.id]
-    );
+    const { data: template, error: queryError } = await supabase
+      .from('templates')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', req.user.id)
+      .single();
 
-    if (result.rows.length === 0) {
+    if (queryError || !template) {
       return res.status(404).json({ error: 'Template not found' });
     }
 
-    const template = result.rows[0];
     res.json({
       ...template,
       variables: extractVariables(template.subject + ' ' + template.body)
@@ -366,12 +494,20 @@ app.post('/api/templates', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Name, subject, and body are required' });
     }
 
-    const result = await pool.query(
-      'INSERT INTO templates (user_id, name, subject, body, category) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [req.user.id, name, subject, body, category || 'general']
-    );
+    const { data: template, error: insertError } = await supabase
+      .from('templates')
+      .insert([{
+        user_id: req.user.id,
+        name,
+        subject,
+        body,
+        category: category || 'general'
+      }])
+      .select()
+      .single();
 
-    const template = result.rows[0];
+    if (insertError) throw insertError;
+
     res.json({
       ...template,
       variables: extractVariables(template.subject + ' ' + template.body)
@@ -392,16 +528,24 @@ app.put('/api/templates/:id', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Name, subject, and body are required' });
     }
 
-    const result = await pool.query(
-      'UPDATE templates SET name = $1, subject = $2, body = $3, category = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 AND user_id = $6 RETURNING *',
-      [name, subject, body, category || 'general', id, req.user.id]
-    );
+    const { data: template, error: updateError } = await supabase
+      .from('templates')
+      .update({
+        name,
+        subject,
+        body,
+        category: category || 'general',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
 
-    if (result.rows.length === 0) {
+    if (updateError || !template) {
       return res.status(404).json({ error: 'Template not found' });
     }
 
-    const template = result.rows[0];
     res.json({
       ...template,
       variables: extractVariables(template.subject + ' ' + template.body)
@@ -416,12 +560,13 @@ app.put('/api/templates/:id', authenticateToken, async (req, res) => {
 app.delete('/api/templates/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await pool.query(
-      'DELETE FROM templates WHERE id = $1 AND user_id = $2 RETURNING *',
-      [id, req.user.id]
-    );
+    const { error: deleteError } = await supabase
+      .from('templates')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', req.user.id);
 
-    if (result.rows.length === 0) {
+    if (deleteError) {
       return res.status(404).json({ error: 'Template not found' });
     }
 
@@ -437,20 +582,25 @@ app.delete('/api/templates/:id', authenticateToken, async (req, res) => {
 // Send email
 app.post('/api/emails/send', authenticateToken, async (req, res) => {
   try {
-    const { to, subject, body, templateId, variables, useHtml } = req.body;
+    const { to, subject, body, templateId, variables, useHtml, attachResume, includeSignature } = req.body;
 
     // Validate input
     if (!to || !subject || !body) {
       return res.status(400).json({ error: 'To, subject, and body are required' });
     }
 
-    // Get user's Gmail tokens
-    const userResult = await pool.query(
-      'SELECT gmail_refresh_token, gmail_access_token FROM users WHERE id = $1',
-      [req.user.id]
-    );
+    // Get user's Gmail tokens, resume, and signature
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('gmail_refresh_token, gmail_access_token, resume_filename, resume_data, resume_mimetype, signature_html')
+      .eq('id', req.user.id)
+      .single();
 
-    const user = userResult.rows[0];
+    if (userError || !user) {
+      console.error('Failed to get user:', userError);
+      return res.status(500).json({ error: 'Failed to retrieve user data' });
+    }
+
     if (!user.gmail_refresh_token && !user.gmail_access_token) {
       return res.status(400).json({ error: 'Gmail not connected. Please connect your Gmail account first.' });
     }
@@ -473,27 +623,66 @@ app.post('/api/emails/send', authenticateToken, async (req, res) => {
       finalBody = fillTemplate(body, variables);
     }
 
-    // Create email message
+    // Append signature if available and user wants it included
+    if (includeSignature !== false && user.signature_html) {
+      // Add two line breaks before the signature for proper spacing
+      finalBody = finalBody + '\n\n' + user.signature_html;
+    }
+
+    // Create email message with or without attachment
     let message;
-    if (useHtml) {
-      const htmlContent = createHtmlEmail(finalBody);
-      message = [
-        'Content-Type: text/html; charset="UTF-8"\n',
-        'MIME-Version: 1.0\n',
-        'Content-Transfer-Encoding: 7bit\n',
-        `To: ${to}\n`,
-        `Subject: ${finalSubject}\n\n`,
-        htmlContent
-      ].join('');
+    const boundary = '----=_Part_' + Date.now();
+
+    if (attachResume && user.resume_data) {
+      // Create multipart message with attachment
+      const htmlContent = useHtml ? createHtmlEmail(finalBody) : finalBody;
+      const contentType = useHtml ? 'text/html' : 'text/plain';
+
+      const messageParts = [
+        `MIME-Version: 1.0`,
+        `To: ${to}`,
+        `Subject: ${finalSubject}`,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`,
+        '',
+        `--${boundary}`,
+        `Content-Type: ${contentType}; charset="UTF-8"`,
+        `Content-Transfer-Encoding: 7bit`,
+        '',
+        htmlContent,
+        '',
+        `--${boundary}`,
+        `Content-Type: ${user.resume_mimetype}; name="${user.resume_filename}"`,
+        `Content-Disposition: attachment; filename="${user.resume_filename}"`,
+        `Content-Transfer-Encoding: base64`,
+        '',
+        user.resume_data.toString('base64'),
+        '',
+        `--${boundary}--`
+      ];
+
+      message = messageParts.join('\r\n');
     } else {
-      message = [
-        'Content-Type: text/plain; charset="UTF-8"\n',
-        'MIME-Version: 1.0\n',
-        'Content-Transfer-Encoding: 7bit\n',
-        `To: ${to}\n`,
-        `Subject: ${finalSubject}\n\n`,
-        finalBody
-      ].join('');
+      // Simple message without attachment
+      if (useHtml) {
+        const htmlContent = createHtmlEmail(finalBody);
+        message = [
+          'Content-Type: text/html; charset="UTF-8"\n',
+          'MIME-Version: 1.0\n',
+          'Content-Transfer-Encoding: 7bit\n',
+          `To: ${to}\n`,
+          `Subject: ${finalSubject}\n\n`,
+          htmlContent
+        ].join('');
+      } else {
+        message = [
+          'Content-Type: text/plain; charset="UTF-8"\n',
+          'MIME-Version: 1.0\n',
+          'Content-Transfer-Encoding: 7bit\n',
+          `To: ${to}\n`,
+          `Subject: ${finalSubject}\n\n`,
+          finalBody
+        ].join('');
+      }
     }
 
     const encodedMessage = Buffer.from(message)
@@ -511,15 +700,24 @@ app.post('/api/emails/send', authenticateToken, async (req, res) => {
     });
 
     // Save to sent emails
-    const sentResult = await pool.query(
-      'INSERT INTO sent_emails (user_id, template_id, recipient, subject, body, variables_used) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [req.user.id, templateId || null, to, finalSubject, finalBody, JSON.stringify(variables || {})]
-    );
+    const { data: sentEmail } = await supabase
+      .from('sent_emails')
+      .insert([{
+        user_id: req.user.id,
+        template_id: templateId || null,
+        recipient: to,
+        subject: finalSubject,
+        body: finalBody,
+        variables_used: variables || {},
+        has_attachment: attachResume && !!user.resume_data
+      }])
+      .select()
+      .single();
 
     res.json({
       success: true,
       message: 'Email sent successfully',
-      sentEmail: sentResult.rows[0],
+      sentEmail: sentEmail,
       messageId: sendResult.data.id
     });
   } catch (error) {
@@ -540,16 +738,26 @@ app.post('/api/emails/send', authenticateToken, async (req, res) => {
 // Get sent emails
 app.get('/api/emails/sent', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT se.*, t.name as template_name
-       FROM sent_emails se
-       LEFT JOIN templates t ON se.template_id = t.id
-       WHERE se.user_id = $1
-       ORDER BY se.sent_at DESC
-       LIMIT 100`,
-      [req.user.id]
-    );
-    res.json(result.rows);
+    const { data: sentEmails, error: queryError } = await supabase
+      .from('sent_emails')
+      .select(`
+        *,
+        templates:template_id (name)
+      `)
+      .eq('user_id', req.user.id)
+      .order('sent_at', { ascending: false })
+      .limit(100);
+
+    if (queryError) throw queryError;
+
+    // Flatten the nested template name
+    const formattedEmails = sentEmails.map(email => ({
+      ...email,
+      template_name: email.templates?.name || null,
+      templates: undefined
+    }));
+
+    res.json(formattedEmails);
   } catch (error) {
     console.error('Get sent emails error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -559,33 +767,40 @@ app.get('/api/emails/sent', authenticateToken, async (req, res) => {
 // Get email statistics
 app.get('/api/emails/stats', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT
-        COUNT(*) as total_sent,
-        COUNT(DISTINCT recipient) as unique_recipients,
-        DATE(sent_at) as date,
-        COUNT(*) as count
-       FROM sent_emails
-       WHERE user_id = $1
-       AND sent_at > NOW() - INTERVAL '30 days'
-       GROUP BY DATE(sent_at)
-       ORDER BY date DESC`,
-      [req.user.id]
-    );
+    // Get total stats
+    const { data: allEmails } = await supabase
+      .from('sent_emails')
+      .select('recipient')
+      .eq('user_id', req.user.id);
 
-    const totalResult = await pool.query(
-      `SELECT
-        COUNT(*) as total_sent,
-        COUNT(DISTINCT recipient) as unique_recipients
-       FROM sent_emails
-       WHERE user_id = $1`,
-      [req.user.id]
-    );
+    const totalSent = allEmails?.length || 0;
+    const uniqueRecipients = new Set(allEmails?.map(e => e.recipient)).size;
+
+    // Get recent activity (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const { data: recentEmails } = await supabase
+      .from('sent_emails')
+      .select('sent_at')
+      .eq('user_id', req.user.id)
+      .gte('sent_at', thirtyDaysAgo.toISOString());
+
+    // Group by date
+    const activityByDate = {};
+    recentEmails?.forEach(email => {
+      const date = email.sent_at.split('T')[0];
+      activityByDate[date] = (activityByDate[date] || 0) + 1;
+    });
+
+    const recentActivity = Object.entries(activityByDate)
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => b.date.localeCompare(a.date));
 
     res.json({
-      totalSent: parseInt(totalResult.rows[0]?.total_sent || 0),
-      uniqueRecipients: parseInt(totalResult.rows[0]?.unique_recipients || 0),
-      recentActivity: result.rows
+      totalSent,
+      uniqueRecipients,
+      recentActivity
     });
   } catch (error) {
     console.error('Get email stats error:', error);
@@ -594,61 +809,236 @@ app.get('/api/emails/stats', authenticateToken, async (req, res) => {
 });
 
 // ==================== DATABASE INITIALIZATION ====================
-
-const initDatabase = async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        name VARCHAR(255),
-        gmail_refresh_token TEXT,
-        gmail_access_token TEXT,
-        gmail_address VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS templates (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        name VARCHAR(255) NOT NULL,
-        subject TEXT NOT NULL,
-        body TEXT NOT NULL,
-        category VARCHAR(100) DEFAULT 'general',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS sent_emails (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        template_id INTEGER REFERENCES templates(id) ON DELETE SET NULL,
-        recipient VARCHAR(255) NOT NULL,
-        subject TEXT NOT NULL,
-        body TEXT NOT NULL,
-        variables_used JSONB,
-        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_templates_user_id ON templates(user_id);
-      CREATE INDEX IF NOT EXISTS idx_sent_emails_user_id ON sent_emails(user_id);
-      CREATE INDEX IF NOT EXISTS idx_sent_emails_sent_at ON sent_emails(sent_at DESC);
-    `);
-    console.log('Database initialized successfully');
-  } catch (error) {
-    console.error('Database initialization error:', error);
-  }
-};
+// Note: Database tables are managed by Supabase.
+// Run the supabase-migration.sql script in your Supabase SQL Editor to set up the schema.
 
 // Health check endpoint
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ============ CONTACTS ENDPOINTS ============
+
+// Get all contacts for user
+app.get('/api/contacts', authenticateToken, async (req, res) => {
+  try {
+    const { data: contacts, error: queryError } = await supabase
+      .from('contacts')
+      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .eq('user_id', req.user.id)
+      .order('updated_at', { ascending: false });
+
+    if (queryError) throw queryError;
+
+    res.json(contacts);
+  } catch (error) {
+    console.error('Get contacts error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get single contact
+app.get('/api/contacts/:id', authenticateToken, async (req, res) => {
+  try {
+    const { data: contact, error: queryError } = await supabase
+      .from('contacts')
+      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (queryError || !contact) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    res.json(contact);
+  } catch (error) {
+    console.error('Get contact error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create contact
+app.post('/api/contacts', authenticateToken, async (req, res) => {
+  try {
+    const { name, email, linkedin, company, position, group_affiliation, timeline, notes, status } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    const { data: contact, error: insertError } = await supabase
+      .from('contacts')
+      .insert([{
+        user_id: req.user.id,
+        name,
+        email: email || null,
+        linkedin: linkedin || null,
+        company: company || null,
+        position: position || null,
+        group_affiliation: group_affiliation || null,
+        timeline: timeline || null,
+        notes: notes || null,
+        status: status || 'not_contacted'
+      }])
+      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .single();
+
+    if (insertError) throw insertError;
+
+    res.status(201).json(contact);
+  } catch (error) {
+    console.error('Create contact error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update contact
+app.put('/api/contacts/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, email, linkedin, company, position, group_affiliation, timeline, notes, status } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    const { data: contact, error: updateError } = await supabase
+      .from('contacts')
+      .update({
+        name,
+        email: email || null,
+        linkedin: linkedin || null,
+        company: company || null,
+        position: position || null,
+        group_affiliation: group_affiliation || null,
+        timeline: timeline || null,
+        notes: notes || null,
+        status: status || 'not_contacted',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .single();
+
+    if (updateError || !contact) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    res.json(contact);
+  } catch (error) {
+    console.error('Update contact error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete contact
+app.delete('/api/contacts/:id', authenticateToken, async (req, res) => {
+  try {
+    const { error: deleteError } = await supabase
+      .from('contacts')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id);
+
+    if (deleteError) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete contact error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Start server
-app.listen(PORT, async () => {
-  await initDatabase();
+app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Supabase URL: ${process.env.SUPABASE_URL ? '✓ Configured' : '✗ Not configured'}`);
+});
+
+// ==================== RESUME ROUTES ====================
+
+// Upload resume
+app.post('/api/resume/upload', authenticateToken, upload.single('resume'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { originalname, buffer, mimetype } = req.file;
+
+    // Save resume to database (Note: For large files, consider using Supabase Storage instead)
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({
+        resume_filename: originalname,
+        resume_data: buffer,
+        resume_mimetype: mimetype,
+        resume_uploaded_at: new Date().toISOString()
+      })
+      .eq('id', req.user.id);
+
+    if (updateError) throw updateError;
+
+    res.json({
+      success: true,
+      filename: originalname,
+      size: buffer.length,
+      uploadedAt: new Date()
+    });
+  } catch (error) {
+    console.error('Resume upload error:', error);
+    res.status(500).json({ error: 'Failed to upload resume' });
+  }
+});
+
+// Get resume info
+app.get('/api/resume/info', authenticateToken, async (req, res) => {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('resume_filename, resume_mimetype, resume_uploaded_at, resume_data')
+      .eq('id', req.user.id)
+      .single();
+
+    if (!user || !user.resume_filename) {
+      return res.json({ hasResume: false });
+    }
+
+    res.json({
+      hasResume: true,
+      filename: user.resume_filename,
+      mimetype: user.resume_mimetype,
+      size: user.resume_data ? Buffer.from(user.resume_data).length : 0,
+      uploadedAt: user.resume_uploaded_at
+    });
+  } catch (error) {
+    console.error('Get resume info error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete resume
+app.delete('/api/resume', authenticateToken, async (req, res) => {
+  try {
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({
+        resume_filename: null,
+        resume_data: null,
+        resume_mimetype: null,
+        resume_uploaded_at: null
+      })
+      .eq('id', req.user.id);
+
+    if (updateError) throw updateError;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete resume error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });

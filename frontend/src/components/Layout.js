@@ -16,6 +16,9 @@ function Layout({ children }) {
           <NavLink to="/" end>
             Dashboard
           </NavLink>
+          <NavLink to="/contacts">
+            Contacts
+          </NavLink>
           <NavLink to="/compose">
             Compose Email
           </NavLink>
@@ -24,6 +27,9 @@ function Layout({ children }) {
           </NavLink>
           <NavLink to="/sent">
             Sent Emails
+          </NavLink>
+          <NavLink to="/settings">
+            Signature & Resume
           </NavLink>
         </nav>
 

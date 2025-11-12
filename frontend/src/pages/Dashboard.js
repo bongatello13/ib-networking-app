@@ -74,12 +74,26 @@ function Dashboard() {
       )}
 
       {gmailStatus?.connected && (
-        <div className="gmail-status connected">
-          <span className="status-icon">✓</span>
-          <div>
-            <strong>Gmail Connected</strong>
-            <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>{gmailStatus.gmailAddress}</p>
+        <div className="gmail-status connected" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span className="status-icon">✓</span>
+            <div>
+              <strong>Gmail Connected</strong>
+              <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>{gmailStatus.gmailAddress}</p>
+            </div>
           </div>
+          <button
+            onClick={async () => {
+              if (window.confirm('Are you sure you want to disconnect Gmail? You will need to reconnect to send emails.')) {
+                await gmailAPI.disconnect();
+                setGmailStatus({ connected: false });
+              }
+            }}
+            className="btn"
+            style={{ padding: '6px 12px', fontSize: '13px', background: '#657786' }}
+          >
+            Disconnect
+          </button>
         </div>
       )}
 

@@ -4,9 +4,11 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
 import Dashboard from './pages/Dashboard';
+import Contacts from './pages/Contacts';
 import Templates from './pages/Templates';
 import Compose from './pages/Compose';
 import SentEmails from './pages/SentEmails';
+import Settings from './pages/Settings';
 import './App.css';
 
 function PrivateRoute({ children }) {
@@ -59,6 +61,14 @@ function App() {
             }
           />
           <Route
+            path="/contacts"
+            element={
+              <PrivateRoute>
+                <Contacts />
+              </PrivateRoute>
+            }
+          />
+          <Route
             path="/templates"
             element={
               <PrivateRoute>
@@ -79,6 +89,14 @@ function App() {
             element={
               <PrivateRoute>
                 <SentEmails />
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <PrivateRoute>
+                <Settings />
               </PrivateRoute>
             }
           />

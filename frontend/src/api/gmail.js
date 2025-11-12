@@ -15,4 +15,14 @@ export const gmailAPI = {
     const response = await apiClient.post('/api/gmail/disconnect');
     return response.data;
   },
+
+  getSignature: async () => {
+    const response = await apiClient.get('/api/gmail/signature');
+    return response.data;
+  },
+
+  saveSignature: async (signature) => {
+    const response = await apiClient.post('/api/gmail/signature', { signature });
+    return response.data;
+  },
 };
