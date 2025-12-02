@@ -2,7 +2,7 @@
 const express = require('express');
 const cors = require('cors');
 const { supabase } = require('./supabaseClient');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { google } = require('googleapis');
 const multer = require('multer');
