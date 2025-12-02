@@ -101,22 +101,40 @@ const fillTemplate = (template, variables) => {
 
 // Helper function to create HTML email from plain text
 const createHtmlEmail = (body) => {
-  // Convert line breaks to <br> tags - preserve exact formatting, no indentation
-  const htmlBody = body
-    .split('\n')
-    .join('<br>');
+  // Convert line breaks to <br> tags and wrap paragraphs
+  const paragraphs = body.split('\n\n');
+  const htmlBody = paragraphs
+    .map(p => {
+      const lines = p.split('\n').join('<br>');
+      return lines ? `<div>${lines}</div>` : '<div><br></div>';
+    })
+    .join('');
 
-  // Match Gmail's exact styling from inspected element
+  // Match Gmail's responsive styling
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #222;
+    margin: 0;
+    padding: 0;
+    -webkit-text-size-adjust: 100%;
+  }
+  @media only screen and (max-width: 600px) {
+    body {
+      font-size: 16px !important;
+    }
+  }
+</style>
 </head>
-<body style="font-family: Arial, Helvetica, sans-serif; font-size: 13px; line-height: 19.5px; color: rgb(34, 34, 34); direction: ltr; margin: 0; padding: 0;">
-<div>
+<body>
 ${htmlBody}
-</div>
 </body>
 </html>`;
 };
