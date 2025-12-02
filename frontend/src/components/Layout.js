@@ -14,22 +14,25 @@ function Layout({ children }) {
 
         <nav className="sidebar-nav">
           <NavLink to="/" end>
-            Dashboard
+            📊 Dashboard
+          </NavLink>
+          <NavLink to="/firms">
+            🏢 Firms
           </NavLink>
           <NavLink to="/contacts">
-            Contacts
+            👥 Contacts
           </NavLink>
           <NavLink to="/compose">
-            Compose Email
+            ✉️ Compose Email
+          </NavLink>
+          <NavLink to="/scheduled">
+            📅 Scheduled Emails
           </NavLink>
           <NavLink to="/templates">
-            Templates
-          </NavLink>
-          <NavLink to="/sent">
-            Sent Emails
+            📄 Templates
           </NavLink>
           <NavLink to="/settings">
-            Signature & Resume
+            ⚙️ Settings
           </NavLink>
         </nav>
 

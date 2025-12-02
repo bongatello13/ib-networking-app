@@ -4,11 +4,12 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
 import Dashboard from './pages/Dashboard';
+import Firms from './pages/Firms';
 import Contacts from './pages/Contacts';
-import Templates from './pages/Templates';
 import Compose from './pages/Compose';
-import SentEmails from './pages/SentEmails';
+import Templates from './pages/Templates';
 import Settings from './pages/Settings';
+import ScheduledEmails from './pages/ScheduledEmails';
 import './App.css';
 
 function PrivateRoute({ children }) {
@@ -61,18 +62,18 @@ function App() {
             }
           />
           <Route
-            path="/contacts"
+            path="/firms"
             element={
               <PrivateRoute>
-                <Contacts />
+                <Firms />
               </PrivateRoute>
             }
           />
           <Route
-            path="/templates"
+            path="/contacts"
             element={
               <PrivateRoute>
-                <Templates />
+                <Contacts />
               </PrivateRoute>
             }
           />
@@ -85,10 +86,10 @@ function App() {
             }
           />
           <Route
-            path="/sent"
+            path="/templates"
             element={
               <PrivateRoute>
-                <SentEmails />
+                <Templates />
               </PrivateRoute>
             }
           />
@@ -97,6 +98,14 @@ function App() {
             element={
               <PrivateRoute>
                 <Settings />
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/scheduled"
+            element={
+              <PrivateRoute>
+                <ScheduledEmails />
               </PrivateRoute>
             }
           />

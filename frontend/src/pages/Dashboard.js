@@ -46,10 +46,22 @@ function Dashboard() {
     }
   };
 
+  const disconnectGmail = async () => {
+    if (window.confirm('Are you sure you want to disconnect your Gmail account?')) {
+      try {
+        await gmailAPI.disconnect();
+        setGmailStatus({ connected: false, gmailAddress: null });
+      } catch (error) {
+        console.error('Error disconnecting Gmail:', error);
+        alert('Failed to disconnect Gmail');
+      }
+    }
+  };
+
   if (loading) {
     return (
       <Layout>
-        <div>Loading...</div>
+        <div className="dashboard-loading">Loading dashboard...</div>
       </Layout>
     );
   }
@@ -58,77 +70,43 @@ function Dashboard() {
     <Layout>
       <div className="page-header">
         <h1>Dashboard</h1>
-        <p>Manage your IB networking emails</p>
+        <p>Your IB networking overview</p>
       </div>
 
-      {!gmailStatus?.connected && (
-        <div className="card">
-          <h2>Connect Gmail</h2>
-          <p style={{ marginBottom: '16px', color: '#7f8c8d' }}>
-            Connect your Gmail account to start sending personalized networking emails to investment bankers.
-          </p>
-          <button onClick={connectGmail} className="btn btn-primary" style={{ width: 'auto' }}>
-            Connect Gmail Account
-          </button>
-        </div>
-      )}
-
-      {gmailStatus?.connected && (
-        <div className="gmail-status connected" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <span className="status-icon">✓</span>
-            <div>
-              <strong>Gmail Connected</strong>
-              <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>{gmailStatus.gmailAddress}</p>
-            </div>
+      <div className="card">
+        <h2>Gmail Connection</h2>
+        {gmailStatus?.connected ? (
+          <div className="status-connected">
+            <p>✅ Connected as: {gmailStatus.gmailAddress}</p>
+            <button onClick={disconnectGmail} className="btn btn-danger" style={{ marginTop: '12px' }}>
+              Disconnect Gmail
+            </button>
           </div>
-          <button
-            onClick={async () => {
-              if (window.confirm('Are you sure you want to disconnect Gmail? You will need to reconnect to send emails.')) {
-                await gmailAPI.disconnect();
-                setGmailStatus({ connected: false });
-              }
-            }}
-            className="btn"
-            style={{ padding: '6px 12px', fontSize: '13px', background: '#657786' }}
-          >
-            Disconnect
-          </button>
-        </div>
-      )}
-
-      <div className="stats-grid">
-        <div className="stat-card">
-          <h3>Emails Sent</h3>
-          <p>{stats?.totalSent || 0}</p>
-        </div>
-        <div className="stat-card">
-          <h3>Unique Recipients</h3>
-          <p>{stats?.uniqueRecipients || 0}</p>
-        </div>
+        ) : (
+          <div className="status-disconnected">
+            <p>❌ Gmail not connected</p>
+            <button onClick={connectGmail} className="btn btn-primary">
+              Connect Gmail
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="card">
         <h2>Quick Actions</h2>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginTop: '16px' }}>
-          <button 
-            onClick={() => navigate('/compose')} 
+        <div className="quick-actions">
+          <button
+            onClick={() => navigate('/compose')}
             className="btn btn-primary"
             disabled={!gmailStatus?.connected}
           >
-            Compose Email
+            ✉️ Compose Email
           </button>
-          <button 
-            onClick={() => navigate('/templates')} 
-            className="btn btn-secondary"
-          >
-            Manage Templates
+          <button onClick={() => navigate('/contacts')} className="btn btn-secondary">
+            👥 View Contacts
           </button>
-          <button 
-            onClick={() => navigate('/sent')} 
-            className="btn btn-secondary"
-          >
-            View Sent Emails
+          <button onClick={() => navigate('/firms')} className="btn btn-secondary">
+            🏢 View Firms
           </button>
         </div>
       </div>

@@ -6,6 +6,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { google } = require('googleapis');
 const multer = require('multer');
+const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
@@ -224,6 +225,7 @@ app.get('/api/gmail/auth-url', authenticateToken, (req, res) => {
     access_type: 'offline',
     scope: [
       'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/gmail.readonly', // Required for reading sent emails
       'https://www.googleapis.com/auth/gmail.settings.basic',
       'https://www.googleapis.com/auth/userinfo.email'
     ],
@@ -582,7 +584,7 @@ app.delete('/api/templates/:id', authenticateToken, async (req, res) => {
 // Send email
 app.post('/api/emails/send', authenticateToken, async (req, res) => {
   try {
-    const { to, subject, body, templateId, variables, useHtml, attachResume, includeSignature } = req.body;
+    const { to, subject, body, templateId, variables, useHtml, attachResume, includeSignature, contactId } = req.body;
 
     // Validate input
     if (!to || !subject || !body) {
@@ -714,6 +716,31 @@ app.post('/api/emails/send', authenticateToken, async (req, res) => {
       .select()
       .single();
 
+    // Auto-update contact status if contactId is provided
+    if (contactId) {
+      const now = new Date().toISOString();
+      await supabase
+        .from('contacts')
+        .update({
+          status: 'emailed',
+          email_date: now,
+          last_contact_date: now,
+          updated_at: now
+        })
+        .eq('id', contactId)
+        .eq('user_id', req.user.id);
+
+      // Create timeline note for the email
+      await supabase
+        .from('timeline_notes')
+        .insert([{
+          contact_id: parseInt(contactId),
+          user_id: req.user.id,
+          type: 'email',
+          content: `Email sent: ${finalSubject}`
+        }]);
+    }
+
     res.json({
       success: true,
       message: 'Email sent successfully',
@@ -808,6 +835,249 @@ app.get('/api/emails/stats', authenticateToken, async (req, res) => {
   }
 });
 
+// Get email threads for a specific contact
+app.get('/api/contacts/:id/emails', authenticateToken, async (req, res) => {
+  try {
+    // Get contact to find their email
+    const { data: contact, error: contactError } = await supabase
+      .from('contacts')
+      .select('email')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (contactError || !contact) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    if (!contact.email) {
+      return res.json({ emails: [], contact: contact.email });
+    }
+
+    // Get user's Gmail tokens
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('gmail_refresh_token, gmail_access_token')
+      .eq('id', req.user.id)
+      .single();
+
+    if (userError || !user) {
+      return res.status(500).json({ error: 'Failed to retrieve user data' });
+    }
+
+    if (!user.gmail_refresh_token && !user.gmail_access_token) {
+      return res.status(400).json({ error: 'Gmail not connected' });
+    }
+
+    // Set credentials
+    oauth2Client.setCredentials({
+      refresh_token: user.gmail_refresh_token,
+      access_token: user.gmail_access_token
+    });
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    // Fetch sent emails to this contact
+    const { data: sentEmails } = await supabase
+      .from('sent_emails')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('recipient', contact.email)
+      .order('sent_at', { ascending: false });
+
+    // Fetch received emails from Gmail
+    const receivedEmails = [];
+
+    try {
+      // Search for emails from this contact
+      const searchQuery = `from:${contact.email}`;
+      const listResponse = await gmail.users.messages.list({
+        userId: 'me',
+        q: searchQuery,
+        maxResults: 50 // Limit to most recent 50
+      });
+
+      if (listResponse.data.messages) {
+        // Fetch full details for each message
+        for (const message of listResponse.data.messages) {
+          const fullMessage = await gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'full'
+          });
+
+          const headers = fullMessage.data.payload.headers;
+          const subject = headers.find(h => h.name === 'Subject')?.value || '(No Subject)';
+          const from = headers.find(h => h.name === 'From')?.value || '';
+          const date = headers.find(h => h.name === 'Date')?.value || '';
+          const to = headers.find(h => h.name === 'To')?.value || '';
+
+          // Get email body
+          let body = '';
+          if (fullMessage.data.payload.parts) {
+            const textPart = fullMessage.data.payload.parts.find(
+              part => part.mimeType === 'text/plain'
+            );
+            if (textPart && textPart.body.data) {
+              body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+            }
+          } else if (fullMessage.data.payload.body.data) {
+            body = Buffer.from(fullMessage.data.payload.body.data, 'base64').toString('utf-8');
+          }
+
+          receivedEmails.push({
+            id: message.id,
+            subject,
+            from,
+            to,
+            date: new Date(date).toISOString(),
+            body: body.substring(0, 500), // Limit body preview
+            snippet: fullMessage.data.snippet
+          });
+        }
+      }
+    } catch (gmailError) {
+      console.error('Error fetching Gmail messages:', gmailError);
+      // Continue without received emails if Gmail fetch fails
+    }
+
+    // Combine and sort by date
+    const allEmails = [
+      ...sentEmails.map(e => ({
+        ...e,
+        type: 'sent',
+        date: e.sent_at
+      })),
+      ...receivedEmails.map(e => ({
+        ...e,
+        type: 'received',
+        date: e.date
+      }))
+    ].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    res.json({
+      emails: allEmails,
+      contact: contact.email
+    });
+  } catch (error) {
+    console.error('[EMAIL THREADS] Error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
+// ============ SCHEDULED EMAILS ENDPOINTS ============
+
+// Schedule an email to be sent later
+app.post('/api/emails/schedule', authenticateToken, async (req, res) => {
+  try {
+    const { to, subject, body, scheduledFor, templateId, variables, attachResume, includeSignature, contactId } = req.body;
+
+    // Validate input
+    if (!to || !subject || !body || !scheduledFor) {
+      return res.status(400).json({ error: 'To, subject, body, and scheduledFor are required' });
+    }
+
+    // Validate scheduled time is in the future
+    const scheduledDate = new Date(scheduledFor);
+    if (scheduledDate <= new Date()) {
+      return res.status(400).json({ error: 'Scheduled time must be in the future' });
+    }
+
+    // Insert scheduled email
+    const { data: scheduledEmail, error: insertError } = await supabase
+      .from('scheduled_emails')
+      .insert([{
+        user_id: req.user.id,
+        to_email: to,
+        subject,
+        body,
+        scheduled_for: scheduledFor,
+        template_id: templateId || null,
+        variables: variables || {},
+        attach_resume: attachResume || false,
+        include_signature: includeSignature !== false,
+        contact_id: contactId || null,
+        status: 'pending'
+      }])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    res.json({
+      success: true,
+      message: 'Email scheduled successfully',
+      scheduledEmail
+    });
+  } catch (error) {
+    console.error('Schedule email error:', error);
+    res.status(500).json({ error: 'Failed to schedule email', details: error.message });
+  }
+});
+
+// Get all scheduled emails for user
+app.get('/api/emails/scheduled', authenticateToken, async (req, res) => {
+  try {
+    const { status } = req.query;
+
+    let query = supabase
+      .from('scheduled_emails')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('scheduled_for', { ascending: true });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data: scheduledEmails, error: queryError } = await query;
+
+    if (queryError) throw queryError;
+
+    res.json(scheduledEmails);
+  } catch (error) {
+    console.error('Get scheduled emails error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Cancel a scheduled email
+app.delete('/api/emails/scheduled/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if email exists and is pending
+    const { data: scheduledEmail, error: checkError } = await supabase
+      .from('scheduled_emails')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (checkError || !scheduledEmail) {
+      return res.status(404).json({ error: 'Scheduled email not found' });
+    }
+
+    if (scheduledEmail.status !== 'pending') {
+      return res.status(400).json({ error: 'Can only cancel pending emails' });
+    }
+
+    // Update status to cancelled
+    const { error: updateError } = await supabase
+      .from('scheduled_emails')
+      .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('user_id', req.user.id);
+
+    if (updateError) throw updateError;
+
+    res.json({ success: true, message: 'Scheduled email cancelled' });
+  } catch (error) {
+    console.error('Cancel scheduled email error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ==================== DATABASE INITIALIZATION ====================
 // Note: Database tables are managed by Supabase.
 // Run the supabase-migration.sql script in your Supabase SQL Editor to set up the schema.
@@ -817,16 +1087,190 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ============ COMPANIES ENDPOINTS ============
+
+// Get all companies for user (with contact counts)
+app.get('/api/companies', authenticateToken, async (req, res) => {
+  try {
+    const { data: companies, error: queryError } = await supabase
+      .from('companies')
+      .select(`
+        *,
+        contacts:contacts(count)
+      `)
+      .eq('user_id', req.user.id)
+      .order('ranking', { ascending: true })
+      .order('name', { ascending: true });
+
+    if (queryError) throw queryError;
+
+    // Format response with contact count
+    const formattedCompanies = companies.map(company => ({
+      ...company,
+      contact_count: company.contacts[0]?.count || 0,
+      contacts: undefined // Remove nested contacts object
+    }));
+
+    res.json(formattedCompanies);
+  } catch (error) {
+    console.error('Get companies error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get single company with all contacts
+app.get('/api/companies/:id', authenticateToken, async (req, res) => {
+  try {
+    const { data: company, error: queryError } = await supabase
+      .from('companies')
+      .select(`
+        *,
+        contacts (
+          id, name, email, phone, position, status, quality, tags,
+          email_date, phone_date, last_contact_date, next_followup_date,
+          created_at, updated_at
+        )
+      `)
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (queryError || !company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    res.json(company);
+  } catch (error) {
+    console.error('Get company error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create company
+app.post('/api/companies', authenticateToken, async (req, res) => {
+  try {
+    const { name, ranking, industry, sector, results_progress, notes } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Company name is required' });
+    }
+
+    const { data: company, error: insertError } = await supabase
+      .from('companies')
+      .insert([{
+        user_id: req.user.id,
+        name,
+        ranking: ranking || 'Target',
+        industry: industry || null,
+        sector: sector || null,
+        results_progress: results_progress || null,
+        notes: notes || null
+      }])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    res.status(201).json(company);
+  } catch (error) {
+    console.error('Create company error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update company
+app.put('/api/companies/:id', authenticateToken, async (req, res) => {
+  try {
+    const { name, ranking, industry, sector, results_progress, notes } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Company name is required' });
+    }
+
+    const { data: company, error: updateError } = await supabase
+      .from('companies')
+      .update({
+        name,
+        ranking: ranking || 'Target',
+        industry: industry || null,
+        sector: sector || null,
+        results_progress: results_progress || null,
+        notes: notes || null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+
+    if (updateError || !company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    res.json(company);
+  } catch (error) {
+    console.error('Update company error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete company
+app.delete('/api/companies/:id', authenticateToken, async (req, res) => {
+  try {
+    const { error: deleteError } = await supabase
+      .from('companies')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id);
+
+    if (deleteError) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete company error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============ CONTACTS ENDPOINTS ============
 
-// Get all contacts for user
+// Get all contacts for user (with optional filtering)
 app.get('/api/contacts', authenticateToken, async (req, res) => {
   try {
-    const { data: contacts, error: queryError } = await supabase
+    const { status, quality, company_id, tags } = req.query;
+
+    let query = supabase
       .from('contacts')
-      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
-      .eq('user_id', req.user.id)
-      .order('updated_at', { ascending: false });
+      .select(`
+        id, name, email, phone, linkedin, company, position, company_id,
+        group_affiliation, timeline, notes, email_notes, call_notes, status, quality, tags,
+        email_date, phone_date, last_contact_date, next_followup_date,
+        created_at, updated_at,
+        companies:company_id (id, name, ranking)
+      `)
+      .eq('user_id', req.user.id);
+
+    // Apply filters if provided
+    if (status) {
+      query = query.eq('status', status);
+    }
+    if (quality) {
+      query = query.eq('quality', quality);
+    }
+    if (company_id) {
+      query = query.eq('company_id', company_id);
+    }
+    if (tags) {
+      // Filter by tags array overlap
+      const tagArray = tags.split(',');
+      query = query.overlaps('tags', tagArray);
+    }
+
+    query = query.order('updated_at', { ascending: false });
+
+    const { data: contacts, error: queryError } = await query;
 
     if (queryError) throw queryError;
 
@@ -837,18 +1281,30 @@ app.get('/api/contacts', authenticateToken, async (req, res) => {
   }
 });
 
-// Get single contact
+// Get single contact (with timeline notes)
 app.get('/api/contacts/:id', authenticateToken, async (req, res) => {
   try {
     const { data: contact, error: queryError } = await supabase
       .from('contacts')
-      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .select(`
+        id, name, email, phone, linkedin, company, position, company_id,
+        group_affiliation, timeline, notes, email_notes, call_notes, status, quality, tags,
+        email_date, phone_date, last_contact_date, next_followup_date,
+        email_history, created_at, updated_at,
+        companies:company_id (id, name, ranking),
+        timeline_notes (id, type, content, created_at)
+      `)
       .eq('id', req.params.id)
       .eq('user_id', req.user.id)
       .single();
 
     if (queryError || !contact) {
       return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    // Sort timeline notes by date (newest first)
+    if (contact.timeline_notes) {
+      contact.timeline_notes.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     }
 
     res.json(contact);
@@ -861,7 +1317,11 @@ app.get('/api/contacts/:id', authenticateToken, async (req, res) => {
 // Create contact
 app.post('/api/contacts', authenticateToken, async (req, res) => {
   try {
-    const { name, email, linkedin, company, position, group_affiliation, timeline, notes, status } = req.body;
+    const {
+      name, email, phone, linkedin, company, position, company_id,
+      group_affiliation, timeline, notes, email_notes, call_notes, status, quality, tags,
+      next_followup_date, initial_note, email_date, phone_date
+    } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Name is required' });
@@ -873,18 +1333,44 @@ app.post('/api/contacts', authenticateToken, async (req, res) => {
         user_id: req.user.id,
         name,
         email: email || null,
+        phone: phone || null,
         linkedin: linkedin || null,
         company: company || null,
         position: position || null,
+        company_id: company_id || null,
         group_affiliation: group_affiliation || null,
         timeline: timeline || null,
         notes: notes || null,
-        status: status || 'not_contacted'
+        email_notes: email_notes || null,
+        call_notes: call_notes || null,
+        status: status || 'none',
+        quality: quality || null,
+        tags: tags || [],
+        email_date: email_date || null,
+        phone_date: phone_date || null,
+        next_followup_date: next_followup_date || null
       }])
-      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .select(`
+        id, name, email, phone, linkedin, company, position, company_id,
+        group_affiliation, timeline, notes, email_notes, call_notes, status, quality, tags,
+        email_date, phone_date, last_contact_date, next_followup_date,
+        created_at, updated_at
+      `)
       .single();
 
     if (insertError) throw insertError;
+
+    // If initial note provided, create timeline note
+    if (initial_note && initial_note.trim()) {
+      await supabase
+        .from('timeline_notes')
+        .insert([{
+          contact_id: contact.id,
+          user_id: req.user.id,
+          type: 'general',
+          content: initial_note
+        }]);
+    }
 
     res.status(201).json(contact);
   } catch (error) {
@@ -896,29 +1382,52 @@ app.post('/api/contacts', authenticateToken, async (req, res) => {
 // Update contact
 app.put('/api/contacts/:id', authenticateToken, async (req, res) => {
   try {
-    const { name, email, linkedin, company, position, group_affiliation, timeline, notes, status } = req.body;
+    const {
+      name, email, phone, linkedin, company, position, company_id,
+      group_affiliation, timeline, notes, email_notes, call_notes, status, quality, tags,
+      email_date, phone_date, last_contact_date, next_followup_date
+    } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Name is required' });
     }
 
+    const updateData = {
+      name,
+      email: email || null,
+      phone: phone || null,
+      linkedin: linkedin || null,
+      company: company || null,
+      position: position || null,
+      company_id: company_id || null,
+      group_affiliation: group_affiliation || null,
+      timeline: timeline || null,
+      notes: notes || null,
+      email_notes: email_notes || null,
+      call_notes: call_notes || null,
+      status: status || 'none',
+      quality: quality || null,
+      tags: tags || [],
+      updated_at: new Date().toISOString()
+    };
+
+    // Only update date fields if provided
+    if (email_date !== undefined) updateData.email_date = email_date;
+    if (phone_date !== undefined) updateData.phone_date = phone_date;
+    if (last_contact_date !== undefined) updateData.last_contact_date = last_contact_date;
+    if (next_followup_date !== undefined) updateData.next_followup_date = next_followup_date;
+
     const { data: contact, error: updateError } = await supabase
       .from('contacts')
-      .update({
-        name,
-        email: email || null,
-        linkedin: linkedin || null,
-        company: company || null,
-        position: position || null,
-        group_affiliation: group_affiliation || null,
-        timeline: timeline || null,
-        notes: notes || null,
-        status: status || 'not_contacted',
-        updated_at: new Date().toISOString()
-      })
+      .update(updateData)
       .eq('id', req.params.id)
       .eq('user_id', req.user.id)
-      .select('id, name, email, linkedin, company, position, group_affiliation, timeline, notes, status, created_at, updated_at')
+      .select(`
+        id, name, email, phone, linkedin, company, position, company_id,
+        group_affiliation, timeline, notes, email_notes, call_notes, status, quality, tags,
+        email_date, phone_date, last_contact_date, next_followup_date,
+        created_at, updated_at
+      `)
       .single();
 
     if (updateError || !contact) {
@@ -928,6 +1437,100 @@ app.put('/api/contacts/:id', authenticateToken, async (req, res) => {
     res.json(contact);
   } catch (error) {
     console.error('Update contact error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update contact status (manual override)
+app.put('/api/contacts/:id/status', authenticateToken, async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    if (!['none', 'emailed', 'called'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const now = new Date().toISOString();
+    const updateData = {
+      status,
+      updated_at: now
+    };
+
+    // Auto-set dates based on status
+    if (status === 'emailed') {
+      updateData.email_date = now;
+      updateData.last_contact_date = now;
+    } else if (status === 'called') {
+      updateData.phone_date = now;
+      updateData.last_contact_date = now;
+    }
+
+    const { data: contact, error: updateError } = await supabase
+      .from('contacts')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+
+    if (updateError || !contact) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    res.json(contact);
+  } catch (error) {
+    console.error('Update contact status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Log phone call for contact
+app.post('/api/contacts/:id/call', authenticateToken, async (req, res) => {
+  try {
+    const { duration, quality, note, next_followup_date } = req.body;
+
+    const now = new Date().toISOString();
+
+    // Update contact
+    const updateData = {
+      status: 'called',
+      phone_date: now,
+      last_contact_date: now,
+      updated_at: now
+    };
+
+    if (quality) updateData.quality = quality;
+    if (next_followup_date) updateData.next_followup_date = next_followup_date;
+
+    const { data: contact, error: updateError } = await supabase
+      .from('contacts')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+
+    if (updateError || !contact) {
+      return res.status(404).json({ error: 'Contact not found' });
+    }
+
+    // Create timeline note
+    const noteContent = duration
+      ? `Phone call (${duration} min)${note ? ': ' + note : ''}`
+      : note || 'Phone call';
+
+    await supabase
+      .from('timeline_notes')
+      .insert([{
+        contact_id: parseInt(req.params.id),
+        user_id: req.user.id,
+        type: 'call',
+        content: noteContent
+      }]);
+
+    res.json(contact);
+  } catch (error) {
+    console.error('Log call error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -952,7 +1555,118 @@ app.delete('/api/contacts/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Start server
+// ============ TIMELINE NOTES ENDPOINTS ============
+
+// Get timeline notes for a contact
+app.get('/api/contacts/:id/notes', authenticateToken, async (req, res) => {
+  try {
+    const { data: notes, error: queryError } = await supabase
+      .from('timeline_notes')
+      .select('*')
+      .eq('contact_id', req.params.id)
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (queryError) throw queryError;
+
+    res.json(notes);
+  } catch (error) {
+    console.error('Get timeline notes error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Add timeline note to contact
+app.post('/api/contacts/:id/notes', authenticateToken, async (req, res) => {
+  try {
+    const { type, content } = req.body;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: 'Note content is required' });
+    }
+
+    if (type && !['email', 'call', 'meeting', 'general'].includes(type)) {
+      return res.status(400).json({ error: 'Invalid note type' });
+    }
+
+    const { data: note, error: insertError } = await supabase
+      .from('timeline_notes')
+      .insert([{
+        contact_id: parseInt(req.params.id),
+        user_id: req.user.id,
+        type: type || 'general',
+        content
+      }])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    // Update contact's last_contact_date
+    await supabase
+      .from('contacts')
+      .update({
+        last_contact_date: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id);
+
+    res.status(201).json(note);
+  } catch (error) {
+    console.error('Create timeline note error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update timeline note
+app.put('/api/notes/:id', authenticateToken, async (req, res) => {
+  try {
+    const { content } = req.body;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: 'Note content is required' });
+    }
+
+    const { data: note, error: updateError } = await supabase
+      .from('timeline_notes')
+      .update({ content })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+
+    if (updateError || !note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    res.json(note);
+  } catch (error) {
+    console.error('Update timeline note error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete timeline note
+app.delete('/api/notes/:id', authenticateToken, async (req, res) => {
+  try {
+    const { error: deleteError } = await supabase
+      .from('timeline_notes')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id);
+
+    if (deleteError) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete timeline note error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -1042,3 +1756,174 @@ app.delete('/api/resume', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// ==================== SCHEDULED EMAIL CRON JOB ====================
+
+// Function to process and send scheduled emails
+async function processScheduledEmails() {
+  try {
+    console.log('Checking for scheduled emails to send...');
+
+    // Get all pending scheduled emails that are due
+    const { data: scheduledEmails, error: queryError } = await supabase
+      .from('scheduled_emails')
+      .select('*')
+      .eq('status', 'pending')
+      .lte('scheduled_for', new Date().toISOString());
+
+    if (queryError) {
+      console.error('Error querying scheduled emails:', queryError);
+      return;
+    }
+
+    if (!scheduledEmails || scheduledEmails.length === 0) {
+      console.log('No scheduled emails to send');
+      return;
+    }
+
+    console.log(`Found ${scheduledEmails.length} scheduled email(s) to send`);
+
+    // Process each scheduled email
+    for (const scheduledEmail of scheduledEmails) {
+      try {
+        // Mark as sending (in case of concurrent runs)
+        const { error: updateError } = await supabase
+          .from('scheduled_emails')
+          .update({ status: 'sending' })
+          .eq('id', scheduledEmail.id)
+          .eq('status', 'pending'); // Only update if still pending
+
+        if (updateError) {
+          console.error(`Error updating scheduled email ${scheduledEmail.id}:`, updateError);
+          continue;
+        }
+
+        // Get user's Gmail credentials
+        const { data: user, error: userError } = await supabase
+          .from('users')
+          .select('gmail_access_token, gmail_refresh_token')
+          .eq('id', scheduledEmail.user_id)
+          .single();
+
+        if (userError || !user || !user.gmail_access_token) {
+          throw new Error('User Gmail credentials not found');
+        }
+
+        // Set OAuth2 credentials
+        oauth2Client.setCredentials({
+          access_token: user.gmail_access_token,
+          refresh_token: user.gmail_refresh_token
+        });
+
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+        // Build email body with variables filled in
+        let emailSubject = scheduledEmail.subject;
+        let emailBody = scheduledEmail.body;
+
+        if (scheduledEmail.variables) {
+          Object.entries(scheduledEmail.variables).forEach(([key, value]) => {
+            const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
+            emailSubject = emailSubject.replace(regex, value);
+            emailBody = emailBody.replace(regex, value);
+          });
+        }
+
+        // Add signature if requested
+        if (scheduledEmail.include_signature) {
+          try {
+            const { data: userData } = await supabase
+              .from('users')
+              .select('gmail_signature')
+              .eq('id', scheduledEmail.user_id)
+              .single();
+
+            if (userData?.gmail_signature) {
+              emailBody += '\n\n' + userData.gmail_signature;
+            }
+          } catch (sigError) {
+            console.error('Error fetching signature:', sigError);
+          }
+        }
+
+        // Prepare email message
+        const messageParts = [
+          `To: ${scheduledEmail.to_email}`,
+          `Subject: ${emailSubject}`,
+          'MIME-Version: 1.0',
+          'Content-Type: text/plain; charset=utf-8',
+          '',
+          emailBody
+        ];
+
+        const message = messageParts.join('\n');
+        const encodedMessage = Buffer.from(message)
+          .toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+
+        // Send email
+        await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: {
+            raw: encodedMessage
+          }
+        });
+
+        // Mark as sent
+        await supabase
+          .from('scheduled_emails')
+          .update({
+            status: 'sent',
+            sent_at: new Date().toISOString()
+          })
+          .eq('id', scheduledEmail.id);
+
+        // Update contact status if contact_id is present
+        if (scheduledEmail.contact_id) {
+          try {
+            const { data: contact } = await supabase
+              .from('contacts')
+              .select('status')
+              .eq('id', scheduledEmail.contact_id)
+              .single();
+
+            if (contact && contact.status === 'none') {
+              await supabase
+                .from('contacts')
+                .update({ status: 'emailed' })
+                .eq('id', scheduledEmail.contact_id);
+            }
+          } catch (contactError) {
+            console.error('Error updating contact status:', contactError);
+          }
+        }
+
+        console.log(`Successfully sent scheduled email ${scheduledEmail.id} to ${scheduledEmail.to_email}`);
+
+      } catch (emailError) {
+        console.error(`Error sending scheduled email ${scheduledEmail.id}:`, emailError);
+
+        // Mark as failed
+        await supabase
+          .from('scheduled_emails')
+          .update({
+            status: 'failed',
+            error_message: emailError.message || 'Unknown error'
+          })
+          .eq('id', scheduledEmail.id);
+      }
+    }
+
+  } catch (error) {
+    console.error('Error processing scheduled emails:', error);
+  }
+}
+
+// Run cron job every minute to check for scheduled emails
+cron.schedule('* * * * *', () => {
+  processScheduledEmails();
+});
+
+console.log('Scheduled email cron job initialized (runs every minute)');

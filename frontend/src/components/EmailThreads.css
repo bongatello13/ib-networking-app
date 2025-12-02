@@ -1,0 +1,246 @@
+.email-threads-container {
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.email-threads-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid #e1e8ed;
+}
+
+.email-threads-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #14171a;
+}
+
+.email-count {
+  font-size: 13px;
+  color: #657786;
+  font-weight: 500;
+}
+
+.email-threads-loading,
+.email-threads-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: #657786;
+}
+
+.error-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.email-threads-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: #657786;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.email-threads-empty p {
+  margin: 8px 0;
+  font-size: 15px;
+}
+
+.empty-hint {
+  font-size: 13px;
+  color: #aab8c2;
+  max-width: 400px;
+  margin: 12px auto 0;
+}
+
+.email-threads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.email-thread-item {
+  background: #f7f9fa;
+  border-radius: 8px;
+  border: 1px solid #e1e8ed;
+  overflow: hidden;
+  transition: all 0.2s;
+}
+
+.email-thread-item:hover {
+  border-color: #1DA1F2;
+  box-shadow: 0 2px 8px rgba(29, 161, 242, 0.1);
+}
+
+.email-thread-item.sent {
+  border-left: 4px solid #1DA1F2;
+}
+
+.email-thread-item.received {
+  border-left: 4px solid #17bf63;
+}
+
+.email-thread-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  padding: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.email-thread-info {
+  flex: 1;
+  min-width: 0;
+  margin-right: 12px;
+}
+
+.email-thread-direction {
+  margin-bottom: 8px;
+}
+
+.direction-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.direction-badge.sent {
+  background: #e8f5fe;
+  color: #1DA1F2;
+}
+
+.direction-badge.received {
+  background: #e6f7ed;
+  color: #17bf63;
+}
+
+.direction-icon {
+  font-size: 12px;
+}
+
+.email-thread-subject {
+  font-size: 15px;
+  font-weight: 600;
+  color: #14171a;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.email-thread-preview {
+  font-size: 13px;
+  color: #657786;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.email-thread-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.email-thread-date {
+  font-size: 12px;
+  color: #657786;
+  white-space: nowrap;
+}
+
+.expand-icon {
+  font-size: 12px;
+  color: #657786;
+  transition: transform 0.2s;
+}
+
+.email-thread-item.expanded .expand-icon {
+  transform: rotate(0deg);
+}
+
+.email-thread-body {
+  padding: 0 16px 16px 16px;
+  border-top: 1px solid #e1e8ed;
+  background: white;
+}
+
+.email-detail-row {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 8px 0;
+  font-size: 13px;
+}
+
+.email-detail-label {
+  font-weight: 600;
+  color: #657786;
+  min-width: 50px;
+}
+
+.email-detail-value {
+  color: #14171a;
+  word-break: break-word;
+}
+
+.email-body-content {
+  margin-top: 16px;
+  padding: 16px;
+  background: #f7f9fa;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #14171a;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .email-threads-container {
+    padding: 16px;
+  }
+
+  .email-threads-header h3 {
+    font-size: 16px;
+  }
+
+  .email-thread-header {
+    padding: 12px;
+    flex-direction: column;
+    align-items: start;
+  }
+
+  .email-thread-meta {
+    width: 100%;
+    justify-content: space-between;
+    margin-top: 8px;
+  }
+
+  .email-thread-preview {
+    display: none;
+  }
+}

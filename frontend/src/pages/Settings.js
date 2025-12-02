@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import Layout from '../components/Layout';
 import { gmailAPI } from '../api/gmail';
-
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
 
 function Settings() {
@@ -298,6 +297,7 @@ function Settings() {
           </div>
         )}
       </div>
+
     </Layout>
   );
 }

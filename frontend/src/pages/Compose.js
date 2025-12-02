@@ -28,6 +28,8 @@ function Compose() {
   const [includeSignature, setIncludeSignature] = useState(true);
   const [signatureInfo, setSignatureInfo] = useState(null);
   const [showContactNotes, setShowContactNotes] = useState(false);
+  const [scheduleEmail, setScheduleEmail] = useState(false);
+  const [scheduledDateTime, setScheduledDateTime] = useState('');
 
   useEffect(() => {
     loadTemplates();
@@ -78,6 +80,8 @@ function Compose() {
   };
 
   const loadTemplate = (template) => {
+    console.log('Loading template:', template);
+    console.log('Template variables:', template.variables);
     setSelectedTemplate(template);
     setSubject(template.subject);
     setBody(template.body);
@@ -135,21 +139,53 @@ function Compose() {
     e.preventDefault();
     setError('');
     setSuccess('');
+
+    // Validate scheduled time if scheduling
+    if (scheduleEmail) {
+      if (!scheduledDateTime) {
+        setError('Please select a date and time for scheduling');
+        return;
+      }
+      const scheduledDate = new Date(scheduledDateTime);
+      if (scheduledDate <= new Date()) {
+        setError('Scheduled time must be in the future');
+        return;
+      }
+    }
+
     setSending(true);
 
     try {
-      await emailsAPI.send({
-        to,
-        subject,
-        body,
-        templateId: selectedTemplate?.id,
-        variables,
-        useHtml: true,
-        attachResume: attachResume,
-        includeSignature: includeSignature
-      });
-      setSuccess('Email sent successfully!');
-      
+      if (scheduleEmail) {
+        // Schedule email
+        await emailsAPI.schedule({
+          to,
+          subject,
+          body,
+          scheduledFor: scheduledDateTime,
+          templateId: selectedTemplate?.id,
+          variables,
+          attachResume: attachResume,
+          includeSignature: includeSignature,
+          contactId: selectedContact?.id
+        });
+        setSuccess('Email scheduled successfully!');
+      } else {
+        // Send immediately
+        await emailsAPI.send({
+          to,
+          subject,
+          body,
+          templateId: selectedTemplate?.id,
+          variables,
+          useHtml: true,
+          attachResume: attachResume,
+          includeSignature: includeSignature,
+          contactId: selectedContact?.id
+        });
+        setSuccess('Email sent successfully!');
+      }
+
       // Reset form
       setTimeout(() => {
         setTo('');
@@ -158,6 +194,8 @@ function Compose() {
         setVariables({});
         setSelectedTemplate(null);
         setAttachResume(false);
+        setScheduleEmail(false);
+        setScheduledDateTime('');
         setSuccess('');
       }, 2000);
     } catch (err) {
@@ -278,7 +316,7 @@ function Compose() {
               </select>
             </div>
 
-            {selectedTemplate && selectedTemplate.variables && selectedTemplate.variables.length > 0 && (
+            {selectedTemplate && selectedTemplate.variables && selectedTemplate.variables.length > 0 ? (
               <div className="variables-section">
                 <h3>Fill in Variables</h3>
                 {selectedTemplate.variables.map((variable) => (
@@ -293,7 +331,19 @@ function Compose() {
                   </div>
                 ))}
               </div>
-            )}
+            ) : selectedTemplate ? (
+              <div style={{
+                padding: '16px',
+                background: '#fff3cd',
+                borderRadius: '8px',
+                marginBottom: '16px',
+                border: '1px solid #ffeaa7'
+              }}>
+                <p style={{ margin: 0, fontSize: '14px', color: '#856404' }}>
+                  <strong>No variables detected in this template.</strong> To use variables, edit the template and add placeholders like <code>{'{{banker_name}}'}</code>, <code>{'{{bank_name}}'}</code>, or <code>{'{{school}}'}</code> in the subject or body.
+                </p>
+              </div>
+            ) : null}
 
             <div className="form-group">
               <label>To</label>
@@ -358,13 +408,39 @@ function Compose() {
               </div>
             )}
 
+            <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                type="checkbox"
+                id="schedule-email"
+                checked={scheduleEmail}
+                onChange={(e) => setScheduleEmail(e.target.checked)}
+                style={{ width: 'auto', margin: 0 }}
+              />
+              <label htmlFor="schedule-email" style={{ margin: 0, cursor: 'pointer' }}>
+                Schedule send
+              </label>
+            </div>
+
+            {scheduleEmail && (
+              <div className="form-group">
+                <label>Schedule for</label>
+                <input
+                  type="datetime-local"
+                  value={scheduledDateTime}
+                  onChange={(e) => setScheduledDateTime(e.target.value)}
+                  required
+                  style={{ width: '100%', padding: '12px 16px', border: '2px solid #e1e8ed', borderRadius: '8px', fontSize: '14px' }}
+                />
+              </div>
+            )}
+
             <button
               type="submit"
               className="btn btn-success"
               disabled={sending}
               style={{ width: 'auto' }}
             >
-              {sending ? 'Sending...' : 'Send Email'}
+              {sending ? (scheduleEmail ? 'Scheduling...' : 'Sending...') : (scheduleEmail ? 'Schedule Email' : 'Send Email')}
             </button>
           </form>
 

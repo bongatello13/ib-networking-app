@@ -551,3 +551,157 @@ table tr:hover {
   background: #e0f2f1;
   color: #00796b;
 }
+
+/* Dashboard Styles */
+.status-connected {
+  padding: 16px;
+  background: #d4edda;
+  color: #155724;
+  border-radius: 8px;
+  border: 1px solid #c3e6cb;
+}
+
+.status-disconnected {
+  padding: 16px;
+  background: #fff3cd;
+  color: #856404;
+  border-radius: 8px;
+  border: 1px solid #ffeaa7;
+}
+
+.quick-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dashboard-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 60px 20px;
+  font-size: 18px;
+  color: #666;
+}
+
+/* Status Badges */
+.status-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.status-none {
+  background: #fee;
+  color: #c0392b;
+  border: 1px solid #f5c6cb;
+}
+
+.status-emailed {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffeaa7;
+}
+
+.status-called {
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+/* Contact View Modal */
+.contact-view-content {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.view-section {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #e1e8ed;
+}
+
+.view-section:last-child {
+  border-bottom: none;
+}
+
+.view-section h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #2c3e50;
+  margin-bottom: 16px;
+}
+
+.view-field {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+.view-field label {
+  font-weight: 600;
+  color: #7f8c8d;
+  font-size: 14px;
+}
+
+.view-field span {
+  color: #2c3e50;
+  font-size: 14px;
+}
+
+.view-field-full {
+  margin-bottom: 16px;
+}
+
+.view-field-full label {
+  display: block;
+  font-weight: 600;
+  color: #7f8c8d;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.notes-display {
+  background: #f8f9fa;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid #e1e8ed;
+  color: #2c3e50;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  min-height: 60px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #7f8c8d;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.modal-close:hover {
+  background: #f8f9fa;
+  color: #2c3e50;
+}
